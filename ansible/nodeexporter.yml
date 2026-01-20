@@ -1,0 +1,27 @@
+---
+- name: Install Node Exporter on Web Server
+  hosts: webserver
+  become: yes
+
+  tasks:
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Run Node Exporter container
+      docker_container:
+        name: node_exporter
+        image: quay.io/prometheus/node-exporter:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "9100:9100"
+

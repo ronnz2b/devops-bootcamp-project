@@ -1,0 +1,103 @@
+---
+- name: Get Elastic IP and associate with EC2
+  hosts: localhost
+  gather_facts: no
+  vars:
+    region: "ap-southeast-1"
+    ec2_instance_id: "i-0fca49efe44134c16"
+    eip_name_tag: "web-server-eip"
+
+  tasks:
+    - name: Get Elastic IP info from AWS
+      amazon.aws.ec2_eip_info:
+        region: "{{ region }}"
+      register: eip_info
+
+    - name: Select the EIP for our web server
+      set_fact:
+        web_eip: "{{ eip_info.addresses | selectattr('tags.Name','equalto', eip_name_tag) | first }}"
+
+    - name: Show selected Elastic IP
+      debug:
+        msg: "Selected EIP: {{ web_eip.public_ip }} (Allocation ID: {{ web_eip.allocation_id }})"
+
+    - name: Associate Elastic IP to the web server
+      amazon.aws.ec2_eip:
+        region: "{{ region }}"
+        device_id: "{{ ec2_instance_id }}"
+        ip: "{{ web_eip.public_ip }}"
+        state: present
+
+    - name: Set web_elastic_ip fact dynamically
+      set_fact:
+        web_elastic_ip: "{{ web_eip.public_ip }}"
+
+- name: Deploy Web Server with Docker
+  hosts: webserver
+  become: yes
+  vars:
+    ecr_registry: "378589999398.dkr.ecr.ap-southeast-1.amazonaws.com"
+    ecr_repository: "devops-bootcamp/final-project-mohdazrai"
+    ecr_image_tag: "latest"
+    container_name: "my-devops-project"
+    region: "ap-southeast-1"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - docker.io
+          - awscli
+          - python3-pip
+        state: present
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install Docker Python module
+      pip:
+        name: docker
+        state: present
+
+    - name: Log in to AWS ECR
+      shell: >
+        aws ecr get-login-password --region {{ region }} |
+        docker login --username AWS --password-stdin {{ ecr_registry }}
+      args:
+        executable: /bin/bash
+
+    - name: Pull Docker image from ECR
+      docker_image:
+        name: "{{ ecr_registry }}/{{ ecr_repository }}"
+        tag: "{{ ecr_image_tag }}"
+        source: pull
+
+    - name: Deploy web application container
+      docker_container:
+        name: "{{ container_name }}"
+        image: "{{ ecr_registry }}/{{ ecr_repository }}:{{ ecr_image_tag }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "80:80"
+
+    - name: Wait for HTTP 80 to be reachable
+      uri:
+        url: "http://{{ hostvars['localhost']['web_elastic_ip'] }}"
+        status_code: 200
+        timeout: 30
+      retries: 5
+      delay: 10
+      register: http_check
+      until: http_check.status == 200
+
+    - name: Show public URL
+      debug:
+        msg: "Web application is live at http://{{ hostvars['localhost']['web_elastic_ip'] }}"
