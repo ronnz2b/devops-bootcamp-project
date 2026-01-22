@@ -1,31 +1,36 @@
 ---
-- name: Deploy Monitoring Server (Prometheus + Grafana + Cloudflare Tunnel)
+- name: Deploy Monitoring Stack (Prometheus + Grafana + Cloudflare Tunnel)
   hosts: monitoring
   become: yes
+
   vars:
-    region: ap-southeast-1
-
+    # ----------------------------
     # Prometheus
+    # ----------------------------
     prometheus_config_dir: /opt/prometheus
-    prometheus_image: prom/prometheus:latest
+    prometheus_image: prom/prometheus:v2.51.0
+    node_exporter_target: "10.0.0.5:9100"
 
+    # ----------------------------
     # Grafana
+    # ----------------------------
     grafana_data_dir: /opt/grafana
     grafana_image: grafana/grafana:latest
 
-    # Node Exporter target (web server)
-    node_exporter_target: "10.0.0.5:9100"  # Must be within 10.0.0.0/24
-
+    # ----------------------------
     # Cloudflare Tunnel
+    # ----------------------------
     cloudflared_bin: /usr/local/bin/cloudflared
     cloudflared_config_dir: /etc/cloudflared
 
-    # CHANGE THESE
-    cloudflare_tunnel_id: "<YOUR_TUNNEL_ID>"
-    cloudflare_credentials_file: "<YOUR_TUNNEL_ID>.json"
-    grafana_hostname: "grafana.example.com"
+    # 🔐 Provided at runtime (not in Git)
+    cloudflare_tunnel_token: "{{ lookup('env', 'CLOUDFLARE_TUNNEL_TOKEN') }}"
+    grafana_hostname: "monitoring.azraiidris.com"
 
   tasks:
+    # ----------------------------
+    # Base setup
+    # ----------------------------
     - name: Update apt cache
       apt:
         update_cache: yes
@@ -37,7 +42,7 @@
           - curl
         state: present
 
-    - name: Ensure Docker service is running
+    - name: Ensure Docker is running
       service:
         name: docker
         state: started
@@ -52,7 +57,7 @@
         state: directory
         mode: '0755'
 
-    - name: Create Prometheus configuration file
+    - name: Create Prometheus config
       copy:
         dest: "{{ prometheus_config_dir }}/prometheus.yml"
         content: |
@@ -60,23 +65,22 @@
             scrape_interval: 15s
 
           scrape_configs:
-            - job_name: "node_exporter_web"
+            - job_name: "node_exporter"
               static_configs:
                 - targets: ["{{ node_exporter_target }}"]
 
-    - name: Run Prometheus container
+    - name: Run Prometheus container (host network)
       docker_container:
         name: prometheus
         image: "{{ prometheus_image }}"
         state: started
         restart_policy: always
-        ports:
-          - "9090:9090"  # Local only, no external SG access required
+        network_mode: host
         volumes:
           - "{{ prometheus_config_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml"
 
     # ----------------------------
-    # Grafana
+    # Grafana provisioning
     # ----------------------------
     - name: Create Grafana directories
       file:
@@ -87,15 +91,16 @@
         - "{{ grafana_data_dir }}"
         - "{{ grafana_data_dir }}/provisioning"
         - "{{ grafana_data_dir }}/provisioning/datasources"
+        - "{{ grafana_data_dir }}/provisioning/dashboards"
 
-    - name: Set ownership for Grafana directories
+    - name: Set Grafana directory ownership
       file:
         path: "{{ grafana_data_dir }}"
         owner: 472
         group: 472
         recurse: yes
 
-    - name: Create Grafana datasource (Prometheus)
+    - name: Create Grafana datasource
       copy:
         dest: "{{ grafana_data_dir }}/provisioning/datasources/prometheus.yml"
         content: |
@@ -107,64 +112,60 @@
               url: http://localhost:9090
               isDefault: true
 
-    - name: Run Grafana container
+    - name: Create Grafana dashboard provider
+      copy:
+        dest: "{{ grafana_data_dir }}/provisioning/dashboards/dashboards.yml"
+        content: |
+          apiVersion: 1
+          providers:
+            - name: default
+              orgId: 1
+              folder: ""
+              type: file
+              editable: true
+              options:
+                path: /var/lib/grafana/provisioning/dashboards
+
+    - name: Download Node Exporter dashboard
+      get_url:
+        url: https://grafana.com/api/dashboards/1860/revisions/37/download
+        dest: "{{ grafana_data_dir }}/provisioning/dashboards/node-exporter.json"
+        mode: '0644'
+
+    - name: Run Grafana container (host network)
       docker_container:
         name: grafana
         image: "{{ grafana_image }}"
         state: started
         restart_policy: always
-        ports:
-          - "3000:3000"  # Only internal access, external via Cloudflare Tunnel
+        network_mode: host
         volumes:
           - "{{ grafana_data_dir }}:/var/lib/grafana"
+          - "{{ grafana_data_dir }}/provisioning:/var/lib/grafana/provisioning"
 
     # ----------------------------
-    # Local health checks ONLY
+    # Health checks
     # ----------------------------
-    - name: Wait for Prometheus to be ready
+    - name: Wait for Prometheus
       wait_for:
         host: 127.0.0.1
         port: 9090
-        timeout: 180
+        timeout: 120
 
-    - name: Wait for Grafana HTTP API
+    - name: Wait for Grafana
       wait_for:
         host: 127.0.0.1
         port: 3000
-        timeout: 180
+        timeout: 120
 
     # ----------------------------
-    # Cloudflare Tunnel (for external Grafana access only)
+    # Cloudflare Tunnel
     # ----------------------------
     - name: Download cloudflared
       get_url:
         url: https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         dest: "{{ cloudflared_bin }}"
         mode: '0755'
-
-    - name: Create cloudflared config directory
-      file:
-        path: "{{ cloudflared_config_dir }}"
-        state: directory
-        mode: '0755'
-
-    - name: Copy Cloudflare tunnel credentials
-      copy:
-        src: "{{ cloudflare_credentials_file }}"
-        dest: "{{ cloudflared_config_dir }}/{{ cloudflare_credentials_file }}"
-        mode: '0600'
-
-    - name: Create cloudflared config
-      copy:
-        dest: "{{ cloudflared_config_dir }}/config.yml"
-        content: |
-          tunnel: {{ cloudflare_tunnel_id }}
-          credentials-file: {{ cloudflared_config_dir }}/{{ cloudflare_credentials_file }}
-
-          ingress:
-            - hostname: {{ grafana_hostname }}
-              service: http://localhost:3000
-            - service: http_status:404
 
     - name: Create cloudflared systemd service
       copy:
@@ -175,7 +176,7 @@
           After=network.target
 
           [Service]
-          ExecStart={{ cloudflared_bin }} tunnel run
+          ExecStart={{ cloudflared_bin }} tunnel run --token {{ cloudflare_tunnel_token }}
           Restart=always
           User=root
 
@@ -189,6 +190,9 @@
         enabled: yes
         state: started
 
-    - name: Show Grafana URL
+    # ----------------------------
+    # Output
+    # ----------------------------
+    - name: Show monitoring URL
       debug:
-        msg: "Grafana is available securely at https://{{ grafana_hostname }} via Cloudflare Tunnel"
+        msg: "Monitoring available at https://{{ grafana_hostname }}"
