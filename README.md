@@ -20,7 +20,7 @@ GitHub Pages & Wiki for documentation
 🔗 Project URLs
 
 - **Web Application:** [http://web.azraiidris.com](http://web.azraiidris.com)
-- **Monitoring (Grafana):** [http://monitoring.azraiidris.com](http://monitoring.azraiidris.com)
+- **Monitoring (Grafana):** [https://monitoring.azraiidris.com](https://monitoring.azraiidris.com)
 - **GitHub Repository:** [https://github.com/ronnz2b/devops-bootcamp-project](https://github.com/ronnz2b/devops-bootcamp-project)
 ⚙️ Infrastructure Provisioning (Terraform)
 
